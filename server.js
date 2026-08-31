@@ -63,7 +63,7 @@ async function searchImages(query) {
   try {
     const res = await fetch(
       `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=3`,
-      to { headers: { Authorization: PEXELS_API_KEY.trim() } }
+       { headers: { Authorization: PEXELS_API_KEY.trim() } }
     );
     if (!res.ok) return [];
     const data = await res.json();
