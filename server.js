@@ -3,12 +3,7 @@
  *
  * Free-tier backend: searches Pexels for real reference photos of the
  * prompt, sends them + the prompt to Groq (vision-capable model), and
- * asks it to return a strict JSON build plan. Roblox calls this over
- * HTTPS and builds real Parts from the result.
- *
- * Cost: $0 on both APIs at normal hobby-project volume.
- *   - Pexels: free API key, ~200 requests/hour
- *   - Groq: free tier, ~30 requests/min, no credit card, no phone verification
+ * asks it to return a strict JSON build plan.
  *
  * Setup:
  *   npm install
@@ -25,13 +20,13 @@ app.use(express.json({ limit: "10kb" }));
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-// Groq's vision-capable model lineup shifts fairly often — if this
-// model ID stops working, check https://console.groq.com/docs/vision
-// for the current one and swap it in here.
-const GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+// Groq's vision-capable model lineup changes fairly often — llama-4-scout
+// was deprecated June 17 2026. If this one stops working, check
+// https://console.groq.com/docs/deprecations and
+// https://console.groq.com/docs/vision for the current replacement.
+const GROQ_VISION_MODEL = "qwen/qwen3.6-27b";
 const PORT = process.env.PORT || 3000;
 
-// Simple per-IP rate limit so nobody can hammer your free quota dry.
 const requestLog = new Map();
 const MIN_INTERVAL_MS = 8_000;
 function isRateLimited(ip) {
@@ -44,7 +39,25 @@ function isRateLimited(ip) {
 
 // ------------------------------------------------------------
 // Step 1: find a couple of real reference photos (Pexels, free)
+// Strip size/color filler words from the SEARCH query only (not the
+// prompt sent to the AI) — "a small red castle" searches better as
+// just "castle".
 // ------------------------------------------------------------
+const FILLER_WORDS = [
+  "a", "an", "the", "small", "big", "large", "tiny", "huge", "giant",
+  "mini", "little", "enormous", "massive", "cozy", "compact",
+  "red", "blue", "green", "yellow", "orange", "purple", "pink",
+  "black", "white", "brown", "gray", "grey", "silver", "gold", "golden",
+];
+
+function simplifyForImageSearch(prompt) {
+  const words = prompt
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !FILLER_WORDS.includes(w));
+  return words.length > 0 ? words.join(" ") : prompt;
+}
+
 async function searchImages(query) {
   if (!PEXELS_API_KEY) return [];
   try {
@@ -97,9 +110,10 @@ Respond with ONLY valid JSON, no prose, no markdown fences. Schema:
 
 Rules:
 - Base the shapes and proportions on what's actually visible in the reference photos, not a generic guess.
-- Use at most 40 objects. Prefer a recognizable silhouette over excessive detail.
+- Use 15-40 objects for anything more complex than a single simple item — aim for a genuinely complete, recognizable structure (all major walls/sections/features), not just a rough block.
 - Keep all content appropriate for a general, all-ages audience.
-- If no useful photos were provided, do your best from the text description alone.`;
+- If no useful photos were provided, do your best from the text description alone.
+- Output the complete JSON object. Do not truncate or stop partway through the objects array.`;
 
 async function generateBuildPlan(prompt, images) {
   const content = [{ type: "text", text: `Build request: ${prompt}` }];
@@ -121,6 +135,7 @@ async function generateBuildPlan(prompt, images) {
     body: JSON.stringify({
       model: GROQ_VISION_MODEL,
       response_format: { type: "json_object" },
+      max_tokens: 4096, // headroom for up to 40 objects without truncation
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content },
@@ -130,7 +145,7 @@ async function generateBuildPlan(prompt, images) {
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`Groq API error ${response.status}: ${errText.slice(0, 200)}`);
+    throw new Error(`Groq API error ${response.status}: ${errText.slice(0, 300)}`);
   }
 
   const data = await response.json();
@@ -141,8 +156,7 @@ async function generateBuildPlan(prompt, images) {
 }
 
 // ------------------------------------------------------------
-// Step 3: re-validate before returning to Roblox (defense in depth —
-// Roblox re-validates again too).
+// Step 3: re-validate before returning to Roblox
 // ------------------------------------------------------------
 const ALLOWED_CLASSES = new Set(["Part", "WedgePart"]);
 const ALLOWED_SHAPES = new Set(["Block", "Ball", "Cylinder"]);
@@ -204,10 +218,12 @@ app.post("/build", async (req, res) => {
   }
 
   try {
-    const imageUrls = await searchImages(prompt);
+    const searchQuery = simplifyForImageSearch(prompt);
+    const imageUrls = await searchImages(searchQuery);
     const images = await Promise.all(imageUrls.map(fetchImageAsBase64));
     const rawPlan = await generateBuildPlan(prompt, images.filter(Boolean));
     const safePlan = sanitizePlan(rawPlan);
+    console.log(`Build "${prompt}" -> ${safePlan.objects.length} objects (search: "${searchQuery}", ${images.filter(Boolean).length} photos)`);
     return res.json(safePlan);
   } catch (err) {
     console.error("Build failed:", err.message);
