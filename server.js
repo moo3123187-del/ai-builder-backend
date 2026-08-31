@@ -130,7 +130,7 @@ async function generateBuildPlan(prompt, images) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${GROQ_API_KEY}`,
+      Authorization: `Bearer ${GROQ_API_KEY.trim()}`,
     },
     body: JSON.stringify({
       model: GROQ_VISION_MODEL,
