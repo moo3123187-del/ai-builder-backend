@@ -131,6 +131,7 @@ async function generateBuildPlan(prompt, images) {
     body: JSON.stringify({
       model: GROQ_VISION_MODEL,
       max_tokens: 900, // this model's free tier caps at 1000 output tokens/minute
+      reasoning_effort: "none", // skip "thinking" tokens — we need the budget for the JSON answer itself
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content },
