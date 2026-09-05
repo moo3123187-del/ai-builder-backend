@@ -1,14 +1,6 @@
 /**
  * server.js
- *
- * Free-tier backend: searches Pexels for real reference photos of the
- * prompt, sends them + the prompt to Groq (vision-capable model), and
- * asks it to return a strict JSON build plan.
- *
- * Setup:
- *   npm install
- *   Set env vars: PEXELS_API_KEY, GROQ_API_KEY
- *   npm start
+ * Free-tier backend: Pexels photos + Groq vision reasoning -> build plan.
  */
 
 require("dotenv").config();
@@ -20,10 +12,6 @@ app.use(express.json({ limit: "10kb" }));
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-// Groq's vision-capable model lineup changes fairly often — llama-4-scout
-// was deprecated June 17 2026. If this one stops working, check
-// https://console.groq.com/docs/deprecations and
-// https://console.groq.com/docs/vision for the current replacement.
 const GROQ_VISION_MODEL = "qwen/qwen3.6-27b";
 const PORT = process.env.PORT || 3000;
 
@@ -37,12 +25,6 @@ function isRateLimited(ip) {
   return false;
 }
 
-// ------------------------------------------------------------
-// Step 1: find a couple of real reference photos (Pexels, free)
-// Strip size/color filler words from the SEARCH query only (not the
-// prompt sent to the AI) — "a small red castle" searches better as
-// just "castle".
-// ------------------------------------------------------------
 const FILLER_WORDS = [
   "a", "an", "the", "small", "big", "large", "tiny", "huge", "giant",
   "mini", "little", "enormous", "massive", "cozy", "compact",
@@ -51,10 +33,7 @@ const FILLER_WORDS = [
 ];
 
 function simplifyForImageSearch(prompt) {
-  const words = prompt
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 0 && !FILLER_WORDS.includes(w));
+  const words = prompt.toLowerCase().split(/\s+/).filter((w) => w.length > 0 && !FILLER_WORDS.includes(w));
   return words.length > 0 ? words.join(" ") : prompt;
 }
 
@@ -63,7 +42,7 @@ async function searchImages(query) {
   try {
     const res = await fetch(
       `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=3`,
-       { headers: { Authorization: PEXELS_API_KEY.trim() } }
+      { headers: { Authorization: PEXELS_API_KEY.trim() } }
     );
     if (!res.ok) return [];
     const data = await res.json();
@@ -87,20 +66,26 @@ async function fetchImageAsBase64(url) {
   }
 }
 
-// ------------------------------------------------------------
-// Step 2: ask Groq to look at the photos and produce a build plan
-// ------------------------------------------------------------
-const SYSTEM_PROMPT = `You are a 3D building planner for Roblox. You will be shown reference photos of a real object and asked to convert it into a JSON list of simple block/cylinder/ball shapes that approximate its structure, proportions, and colors.
+const SYSTEM_PROMPT = `You are a 3D building planner for Roblox. You will be shown reference photos of a real object and must convert it into a JSON list of parts approximating its structure, proportions, and colors.
 
-Respond with ONLY valid JSON, no prose, no markdown fences. Schema:
+Available classes:
+- "Part" — general block/ball/cylinder geometry, or with a "meshType" for extra shapes: "Wedge", "CornerWedge", "Prism", "Pyramid", "ParallelRamp", "RightAngleRamp", "Torso", "Head", "Brick"
+- "WedgePart" — sloped ramp
+- "CornerWedgePart" — corner-cut piece
+- "TrussPart" — scaffolding/lattice beam
+- "Seat" — a single sittable seat
+- "VehicleSeat" — a driver's seat
+
+Respond with ONLY a single valid JSON object, nothing else. Schema:
 {
   "objects": [
     {
-      "class": "Part" | "WedgePart",
+      "class": "Part" | "WedgePart" | "CornerWedgePart" | "TrussPart" | "Seat" | "VehicleSeat",
       "shape": "Block" | "Ball" | "Cylinder",
-      "size": [x, y, z],       // studs (1 stud ≈ 1 foot). Between 0.3 and 40 each.
-      "position": [x, y, z],   // studs. Center the whole object near x=0,z=0. y=0 is ground level; keep everything y >= 0.
-      "color": [r, g, b],      // 0-255, based on what you actually see in the photos
+      "meshType": "Wedge" | "CornerWedge" | "Prism" | "Pyramid" | "ParallelRamp" | "RightAngleRamp" | "Torso" | "Head" | "Brick" | null,
+      "size": [x, y, z],
+      "position": [x, y, z],
+      "color": [r, g, b],
       "material": "Plastic" | "Wood" | "Brick" | "Concrete" | "Metal" | "Glass" | "Grass" | "Fabric",
       "name": "short label, max 32 chars"
     }
@@ -109,20 +94,31 @@ Respond with ONLY valid JSON, no prose, no markdown fences. Schema:
 }
 
 Rules:
-- Base the shapes and proportions on what's actually visible in the reference photos, not a generic guess.
-- Use 15-40 objects for anything more complex than a single simple item — aim for a genuinely complete, recognizable structure (all major walls/sections/features), not just a rough block.
-- Keep all content appropriate for a general, all-ages audience.
-- If no useful photos were provided, do your best from the text description alone.
-- Output the complete JSON object. Do not truncate or stop partway through the objects array.`;
+- Base shapes/proportions on what's actually visible in the reference photos.
+- Use 15-40 objects for anything more complex than a single simple item. Build a genuinely complete, recognizable structure -- all major walls/sections/features -- never just one block.
+- Use the variety of classes and mesh types available wherever they make the result more accurate, not just plain Part blocks for everything.
+- Keep content appropriate for a general, all-ages audience.
+- Your entire reply must be exactly one JSON object and nothing else -- no prose, no markdown fences.`;
+
+function extractJson(text) {
+  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start === -1 || end === -1 || end <= start) {
+      throw new Error("No JSON object found in model response");
+    }
+    return JSON.parse(cleaned.slice(start, end + 1));
+  }
+}
 
 async function generateBuildPlan(prompt, images) {
   const content = [{ type: "text", text: `Build request: ${prompt}` }];
   for (const img of images) {
     if (img) {
-      content.push({
-        type: "image_url",
-        image_url: { url: `data:${img.mimeType};base64,${img.base64}` },
-      });
+      content.push({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
     }
   }
 
@@ -134,8 +130,7 @@ async function generateBuildPlan(prompt, images) {
     },
     body: JSON.stringify({
       model: GROQ_VISION_MODEL,
-      response_format: { type: "json_object" },
-      max_tokens: 4096, // headroom for up to 40 objects without truncation
+      max_tokens: 4096,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content },
@@ -151,18 +146,15 @@ async function generateBuildPlan(prompt, images) {
   const data = await response.json();
   const text = data.choices?.[0]?.message?.content;
   if (!text) throw new Error("No text in Groq response");
-
-  return JSON.parse(text);
+  return extractJson(text);
 }
 
-// ------------------------------------------------------------
-// Step 3: re-validate before returning to Roblox
-// ------------------------------------------------------------
-const ALLOWED_CLASSES = new Set(["Part", "WedgePart"]);
+const ALLOWED_CLASSES = new Set(["Part", "WedgePart", "CornerWedgePart", "TrussPart", "Seat", "VehicleSeat"]);
 const ALLOWED_SHAPES = new Set(["Block", "Ball", "Cylinder"]);
-const ALLOWED_MATERIALS = new Set([
-  "Plastic", "Wood", "Brick", "Concrete", "Metal", "Glass", "Grass", "Fabric",
+const ALLOWED_MESH_TYPES = new Set([
+  "Wedge", "CornerWedge", "Prism", "Pyramid", "ParallelRamp", "RightAngleRamp", "Torso", "Head", "Brick",
 ]);
+const ALLOWED_MATERIALS = new Set(["Plastic", "Wood", "Brick", "Concrete", "Metal", "Glass", "Grass", "Fabric"]);
 
 function clamp(n, min, max) {
   n = Number(n);
@@ -180,32 +172,28 @@ function sanitizePlan(plan) {
     if (!Array.isArray(obj.size) || obj.size.length !== 3) return [];
     if (!Array.isArray(obj.position) || obj.position.length !== 3) return [];
 
-    return [
-      {
-        class: obj.class,
-        shape: ALLOWED_SHAPES.has(obj.shape) ? obj.shape : "Block",
-        size: obj.size.map((v) => clamp(v, 0.3, 40)),
-        position: [
-          clamp(obj.position[0], -60, 60),
-          clamp(obj.position[1], 0, 80),
-          clamp(obj.position[2], -60, 60),
-        ],
-        color: Array.isArray(obj.color) && obj.color.length === 3
-          ? obj.color.map((v) => clamp(v, 0, 255))
-          : [155, 155, 155],
-        material: ALLOWED_MATERIALS.has(obj.material) ? obj.material : "Plastic",
-        name: typeof obj.name === "string" ? obj.name.slice(0, 32) : "AIPart",
-      },
-    ];
+    return [{
+      class: obj.class,
+      shape: ALLOWED_SHAPES.has(obj.shape) ? obj.shape : "Block",
+      meshType: ALLOWED_MESH_TYPES.has(obj.meshType) ? obj.meshType : null,
+      size: obj.size.map((v) => clamp(v, 0.3, 40)),
+      position: [
+        clamp(obj.position[0], -60, 60),
+        clamp(obj.position[1], 0, 80),
+        clamp(obj.position[2], -60, 60),
+      ],
+      color: Array.isArray(obj.color) && obj.color.length === 3
+        ? obj.color.map((v) => clamp(v, 0, 255))
+        : [155, 155, 155],
+      material: ALLOWED_MATERIALS.has(obj.material) ? obj.material : "Plastic",
+      name: typeof obj.name === "string" ? obj.name.slice(0, 32) : "AIPart",
+    }];
   });
 
   const notes = typeof plan.notes === "string" ? plan.notes.slice(0, 200) : "";
   return { objects, notes };
 }
 
-// ------------------------------------------------------------
-// Route
-// ------------------------------------------------------------
 app.post("/build", async (req, res) => {
   const ip = req.ip;
   if (isRateLimited(ip)) {
@@ -232,5 +220,5 @@ app.post("/build", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`AI Builder backend (free tier) listening on port ${PORT}`);
+  console.log(`AI Builder backend listening on port ${PORT}`);
 });
