@@ -76,6 +76,10 @@ Available classes:
 - "Seat" — a single sittable seat
 - "VehicleSeat" — a driver's seat
 
+Any object can also emit light by adding a "light" field — use this for windows, lamps, fireplaces, headlights, glowing signs, etc:
+  "light": { "type": "Point" | "Spot", "color": [r,g,b], "brightness": 1-5 }
+Omit "light" entirely (or set it to null) for parts that shouldn't glow.
+
 Respond with ONLY a single valid JSON object, nothing else. Schema:
 {
   "objects": [
@@ -87,7 +91,8 @@ Respond with ONLY a single valid JSON object, nothing else. Schema:
       "position": [x, y, z],
       "color": [r, g, b],
       "material": "Plastic" | "Wood" | "Brick" | "Concrete" | "Metal" | "Glass" | "Grass" | "Fabric",
-      "name": "short label, max 32 chars"
+      "name": "short label, max 32 chars",
+      "light": { "type": "Point" | "Spot", "color": [r,g,b], "brightness": 1-5 } | null
     }
   ],
   "notes": "one short sentence describing what you built and what the photos showed"
@@ -95,22 +100,31 @@ Respond with ONLY a single valid JSON object, nothing else. Schema:
 
 Rules:
 - Base shapes/proportions on what's actually visible in the reference photos.
-- Use 8-18 objects for anything more complex than a single simple item. Build a genuinely complete, recognizable structure -- all major walls/sections/features -- never just one block. Stay concise: this has a strict output budget, so do not exceed 18 objects and keep names short.
+- Use 8-15 objects for anything more complex than a single simple item. Build a genuinely complete, recognizable structure -- all major walls/sections/features -- never just one block. Stay concise: this has a strict output budget, so do not exceed 15 objects and keep names short.
 - Use the variety of classes and mesh types available wherever they make the result more accurate, not just plain Part blocks for everything.
 - Keep content appropriate for a general, all-ages audience.
 - Your entire reply must be exactly one JSON object and nothing else -- no prose, no markdown fences.`;
 
 function extractJson(text) {
-  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  let cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    cleaned = cleaned.slice(start, end + 1);
+  }
+
+  // Repair common small formatting slips models make in long JSON:
+  // trailing commas before ] or }, and // line comments.
+  const repaired = cleaned
+    .replace(/,\s*([\]}])/g, "$1")
+    .replace(/\/\/[^\n]*/g, "");
+
   try {
-    return JSON.parse(cleaned);
+    return JSON.parse(repaired);
   } catch (e) {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start === -1 || end === -1 || end <= start) {
-      throw new Error("No JSON object found in model response");
-    }
-    return JSON.parse(cleaned.slice(start, end + 1));
+    console.error("Raw model output that failed to parse:\n" + text.slice(0, 2000));
+    throw new Error("Model output was not valid JSON even after repair: " + e.message);
   }
 }
 
@@ -188,6 +202,15 @@ function sanitizePlan(plan) {
         : [155, 155, 155],
       material: ALLOWED_MATERIALS.has(obj.material) ? obj.material : "Plastic",
       name: typeof obj.name === "string" ? obj.name.slice(0, 32) : "AIPart",
+      light: (obj.light && (obj.light.type === "Point" || obj.light.type === "Spot"))
+        ? {
+            type: obj.light.type,
+            color: Array.isArray(obj.light.color) && obj.light.color.length === 3
+              ? obj.light.color.map((v) => clamp(v, 0, 255))
+              : [255, 240, 200],
+            brightness: clamp(obj.light.brightness, 1, 5),
+          }
+        : null,
     }];
   });
 
