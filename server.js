@@ -95,7 +95,7 @@ Respond with ONLY a single valid JSON object, nothing else. Schema:
 
 Rules:
 - Base shapes/proportions on what's actually visible in the reference photos.
-- Use 15-40 objects for anything more complex than a single simple item. Build a genuinely complete, recognizable structure -- all major walls/sections/features -- never just one block.
+- Use 8-18 objects for anything more complex than a single simple item. Build a genuinely complete, recognizable structure -- all major walls/sections/features -- never just one block. Stay concise: this has a strict output budget, so do not exceed 18 objects and keep names short.
 - Use the variety of classes and mesh types available wherever they make the result more accurate, not just plain Part blocks for everything.
 - Keep content appropriate for a general, all-ages audience.
 - Your entire reply must be exactly one JSON object and nothing else -- no prose, no markdown fences.`;
@@ -130,7 +130,7 @@ async function generateBuildPlan(prompt, images) {
     },
     body: JSON.stringify({
       model: GROQ_VISION_MODEL,
-      max_tokens: 4096,
+      max_tokens: 900, // this model's free tier caps at 1000 output tokens/minute
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content },
